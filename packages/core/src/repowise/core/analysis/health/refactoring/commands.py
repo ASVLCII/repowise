@@ -7,13 +7,17 @@ import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from ....ingestion.package_roots import owning_package
+from ....ingestion.package_roots import module_for, owning_package
+from ....ingestion.resolvers.dotnet.msbuild import parse_csproj
 from ...test_selection import JS_SUFFIXES, PYTHON_SUFFIXES
 
-#: Each JS/TS test file's package: the directory (``""`` is the repository
-#: root) whose package.json declares a ``test`` script, or None when no
-#: package.json above the file does. A file the map does not hold is None too.
+#: Where each test file runs from. A JS/TS test's value is the directory
+#: (``""`` is the repository root) whose package.json declares a ``test``
+#: script; a C# test's is the project or solution ``dotnet test`` takes. None
+#: when nothing can run the file; a file the map does not hold is None too.
 JsPackages = Mapping[str, str | None]
+
+_SOLUTIONS = (".sln", ".slnx")
 
 
 def _file(test: str) -> str:
@@ -61,12 +65,119 @@ def js_test_packages(
     }
 
 
+def _is_dotnet(test: str) -> bool:
+    return _file(test).lower().endswith(".cs")
+
+
+#: NuGet ids that make a project a test project: the test SDK and each
+#: framework's runner. Ceiling: a project that gets them from a
+#: ``Directory.Build.props`` counts only when nothing references it.
+_TEST_PACKAGES = frozenset(
+    {
+        "microsoft.net.test.sdk",
+        "mstest",
+        "mstest.testadapter",
+        "nunit3testadapter",
+        "tunit",
+        "xunit",
+        "xunit.runner.visualstudio",
+        "xunit.v3",
+        "xunit.v3.mtp-v1",
+        "xunit.v3.mtp-v2",
+    }
+)
+
+
+def _project_graph(root: Path, projects: list[str]) -> tuple[dict[str, set[str]], set[str]]:
+    """Over *projects* (repo-relative ``.csproj`` paths): each referenced one
+    mapped to the projects whose ``ProjectReference`` names it, and the test
+    projects, which declare a test package or are referenced by none.
+    Ceiling: one parse per project in the repository, per call."""
+    by_path = {(root / project).resolve(): project for project in projects}
+    referrers: dict[str, set[str]] = {}
+    declared: set[str] = set()
+    for project in projects:
+        parsed = parse_csproj(root / project)
+        if parsed is None:
+            continue
+        if _TEST_PACKAGES.intersection(map(str.lower, parsed.package_references)):
+            declared.add(project)
+        for target in parsed.project_references:
+            if target in by_path:
+                referrers.setdefault(by_path[target], set()).add(project)
+    return referrers, declared | (set(projects) - referrers.keys())
+
+
+def _root_solution(root: Path) -> str | None:
+    """The repository root's solution file: the only one, or the one named
+    after the checkout; None when there is none or the choice is a guess."""
+    try:
+        names = sorted(p.name for p in root.iterdir() if p.suffix.lower() in _SOLUTIONS)
+    except OSError:
+        return None
+    if len(names) > 1:
+        names = [name for name in names if Path(name).stem.lower() == root.name.lower()]
+    return names[0] if len(names) == 1 else None
+
+
+def _test_project(
+    path: str,
+    by_dir: Mapping[str, list[str]],
+    referrers: Mapping[str, set[str]],
+    test_projects: set[str],
+) -> str | None:
+    """The test project that runs C# file *path*: the one project in its
+    directory when that is a test project, else the only test project that
+    references it (*path* is in a test helper library); None otherwise."""
+    projects = by_dir.get(module_for(path, by_dir.keys()) or "", [])
+    if len(projects) != 1:
+        return None
+    if projects[0] in test_projects:
+        return projects[0]
+    users = [user for user in referrers.get(projects[0], ()) if user in test_projects]
+    return users[0] if len(users) == 1 else None
+
+
+def dotnet_test_projects(
+    root: Path, manifests: Mapping[str, frozenset[str]], tests: Iterable[str]
+) -> dict[str, str | None]:
+    """The project ``dotnet test`` runs each C# test in *tests* through, from
+    the ``.csproj`` names *manifests* (:func:`scan_package_manifests`) records;
+    the root solution when no single test project runs the file, else None.
+    Blocking file reads: an async caller uses a thread."""
+    files = {_file(test) for test in tests if _is_dotnet(test)}
+    if not files:
+        return {}
+    by_dir: dict[str, list[str]] = {}
+    for directory, names in manifests.items():
+        for name in sorted(names):
+            if name.lower().endswith(".csproj"):
+                by_dir.setdefault(directory, []).append(f"{directory}/{name}")
+    referrers, test_projects = _project_graph(root, [p for ps in by_dir.values() for p in ps])
+    solution = _root_solution(root)
+    return {
+        path: _test_project(path, by_dir, referrers, test_projects) or solution for path in files
+    }
+
+
+def packages_for_tests(
+    root: Path, manifests: Mapping[str, frozenset[str]], tests: Iterable[str]
+) -> dict[str, str | None]:
+    """Where each test in *tests* runs from (:data:`JsPackages`), every language."""
+    tests = list(tests)
+    return {
+        **js_test_packages(root, manifests, tests),
+        **dotnet_test_projects(root, manifests, tests),
+    }
+
+
 def plan_packages(tests: Iterable[str], packages: JsPackages | None) -> dict[str, str | None]:
     """The part of *packages* a plan's *tests* use, stored on the plan so a
     later read (batches, a served plan) needs no checkout. Empty without a map."""
     if packages is None:
         return {}
-    return {path: packages.get(path) for path in {_file(test) for test in tests if _is_js(test)}}
+    files = {_file(test) for test in tests}
+    return {path: packages.get(path) for path in files if _is_js(path) or path in packages}
 
 
 def _js_commands(tests: list[str], packages: JsPackages | None) -> list[str]:
@@ -84,6 +195,35 @@ def _js_commands(tests: list[str], packages: JsPackages | None) -> list[str]:
     ]
 
 
+def _dotnet_filter(test: str) -> str | None:
+    """``Class.Method`` for a ``file::...::Class::Method`` id: a substring of
+    the test's fully qualified name, so a namespace or an outer class in front
+    still matches. None for a file, or a name the filter syntax would misread."""
+    name = ".".join(test.split("::")[1:][-2:])
+    return name if re.fullmatch(r"\w+(\.\w+)?", name) else None
+
+
+def _dotnet_commands(tests: list[str], packages: JsPackages | None) -> list[str]:
+    """``dotnet test`` per project, filtered to the named tests; the whole
+    project when any of its tests is a file. A test no project runs gets none."""
+    groups: dict[str, list[str | None]] = {}
+    for test in tests:
+        project = packages.get(_file(test)) if packages is not None else None
+        if project is not None:
+            groups.setdefault(project, []).append(_dotnet_filter(test))
+    commands = []
+    for project, names in sorted(groups.items()):
+        command = f"dotnet test {_arg(project)}"
+        if None not in names:
+            # Double quotes keep ``|`` from every shell. A coverage gate
+            # (coverlet's threshold) fails any filtered run, so it is off.
+            joined = "|".join(sorted({name for name in names if name}))
+            command += f' --filter "{joined}"' if "|" in joined else f" --filter {joined}"
+            command += " -p:CollectCoverage=false"
+        commands.append(command)
+    return commands
+
+
 def commands_for_tests(
     tests: list[str], *, total: int | None = None, packages: JsPackages | None = None
 ) -> list[str]:
@@ -98,8 +238,9 @@ def commands_for_tests(
     its tests: with none found, a bare ``pytest`` or ``npm test`` would run a
     whole suite as if it guarded the change. A JS/TS test runs from the package
     whose ``test`` script owns it (*packages*), with its path relative to that
-    package; a test no package.json can run gets no command. A language other
-    than Python or JS/TS gets none in place of a guess that would fail when run.
+    package; a test no package.json can run gets no command. A C# test runs
+    through the project or solution *packages* names for it. A language other
+    than these gets none in place of a guess that would fail when run.
     """
     if total is not None and total > len(tests):
         tests = sorted({_file(test) for test in tests})
@@ -109,7 +250,15 @@ def commands_for_tests(
     if python_tests:
         commands.append("pytest " + " ".join(map(_arg, python_tests)))
     commands.extend(_js_commands(js_tests, packages))
+    commands.extend(_dotnet_commands([test for test in tests if _is_dotnet(test)], packages))
     return commands
 
 
-__all__ = ["JsPackages", "commands_for_tests", "js_test_packages", "plan_packages"]
+__all__ = [
+    "JsPackages",
+    "commands_for_tests",
+    "dotnet_test_projects",
+    "js_test_packages",
+    "packages_for_tests",
+    "plan_packages",
+]

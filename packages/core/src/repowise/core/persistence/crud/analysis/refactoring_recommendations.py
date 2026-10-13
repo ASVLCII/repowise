@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from repowise.core.analysis.health.refactoring.commands import JsPackages, js_test_packages
+from repowise.core.analysis.health.refactoring.commands import JsPackages, packages_for_tests
 from repowise.core.analysis.health.refactoring.models import RefactoringSuggestion
 from repowise.core.analysis.health.refactoring.recommendations import (
     DEFAULT_TEST_LIMIT,
@@ -221,7 +221,7 @@ async def validation_inputs(
             siblings=_siblings(in_degree),
             symbols=await _symbol_spans(session, repository_id, target_files),
             function_tests=await tests_in_files(session, repository_id, target_files),
-            js_packages=await _js_packages(checkout, test_files),
+            js_packages=await _test_packages(checkout, test_files),
         ),
     )
     return ValidationInputs(
@@ -267,13 +267,13 @@ async def repository_checkout(session: AsyncSession, repository_id: str) -> str 
     return await session.scalar(select(Repository.local_path).where(Repository.id == repository_id))
 
 
-async def _js_packages(checkout: str | None, test_files: set[str]) -> JsPackages | None:
+async def _test_packages(checkout: str | None, test_files: set[str]) -> JsPackages | None:
     root = Path(checkout) if checkout else None
     if root is None or not root.is_dir():
         return None
     # The health pass already scanned this commit's package roots; this reuses it.
     manifests = await asyncio.to_thread(scan_package_manifests, root)
-    return await asyncio.to_thread(js_test_packages, root, manifests, test_files)
+    return await asyncio.to_thread(packages_for_tests, root, manifests, test_files)
 
 
 async def _symbol_spans(

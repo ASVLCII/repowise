@@ -73,6 +73,10 @@ but none reaches the changed function.
 A JavaScript or TypeScript test runs from the package whose `package.json`
 declares its `test` script (`npm --prefix ui-tui test -- src/a.test.ts`), and a
 test that no package can run gets no command.
+A C# test runs through `dotnet test` on the test project that holds it
+(`dotnet test tests/Shop.Tests/Shop.Tests.csproj --filter CartTests.TotalIsZero`),
+or on the repository's solution when no single test project does. With neither,
+the plan has no command.
 
 In a plan with several steps, such as a performance fix at several call sites,
 plan detail adds a `verify` to each step whose tests differ from the plan's: the
