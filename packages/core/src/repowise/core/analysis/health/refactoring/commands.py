@@ -13,24 +13,28 @@ from typing import Any
 
 from ....ingestion.external_systems.maven_model import load_maven_reactor
 from ....ingestion.package_roots import owning_package
-from ....ingestion.resolvers.jvm_gradle import _parse_settings
+from ....ingestion.resolvers.jvm_gradle import parse_settings
 from ....ingestion.workspace_members import (
-    _toml,
     declared_workspace_members,
     manifest_package_name,
+    read_toml,
 )
-from ....workspace.maven_dependencies import _declared_reactor_projects
 from ...test_selection import JS_SUFFIXES, PYTHON_SUFFIXES
 
 #: Each JS/TS test file's package: the directory (``""`` is the repository
 #: root) whose package.json declares a ``test`` script, or None when no
 #: package.json above the file does. A file the map does not hold is None too.
+#: JS keeps this map because it predates :data:`TestRuns`; folding it in is a
+#: follow-up that must keep reading plans stored with it.
 JsPackages = Mapping[str, str | None]
 
-#: Each test file of a language whose runner works per package (Go, Rust, JVM,
-#: Ruby), mapped to ``[run, arg]``: the command that runs its package from the
-#: repository root, and the argument narrowing it to the file's own target, or
-#: None to run the whole package. A file the map does not hold gets no command.
+#: Each test (an id, or the file a capped list collapses to) of a language in
+#: :data:`_RUNNERS`, mapped to ``[run, arg]``: the command that runs its package
+#: from the repository root, and the argument narrowing it to the test's target,
+#: or None to run the whole package. Args of one run are joined with spaces,
+#: except ``--flag=value`` args, whose values merge into one ``--flag "a|b"``
+#: for a runner that keeps only its last such flag. A test the map does not hold
+#: gets no command.
 TestRuns = Mapping[str, Sequence[str | None]]
 
 
@@ -47,44 +51,6 @@ def _arg(path: str) -> str:
     # path with ``"``, ``$`` or a backtick is left as is; upgrade by quoting
     # per shell once a plan names its shell.
     return f'"{path}"' if re.search(r"\s", path) and not re.search(r'["$`]', path) else path
-
-
-def _declares_test(manifest: Path) -> bool:
-    try:
-        scripts = json.loads(manifest.read_text(encoding="utf-8")).get("scripts")
-    except (OSError, ValueError, AttributeError):
-        return False
-    script = scripts.get("test") if isinstance(scripts, dict) else None
-    # npm init's placeholder exits 1 without running anything.
-    return isinstance(script, str) and bool(script) and "no test specified" not in script
-
-
-def js_test_packages(
-    root: Path, manifests: Mapping[str, frozenset[str]], tests: Iterable[str]
-) -> dict[str, str | None]:
-    """The package that runs each JS/TS test in *tests*: the nearest package
-    root (*manifests*, from :func:`scan_package_manifests`) whose package.json
-    declares a test script. Blocking file reads: an async caller uses a thread.
-    """
-    declares: dict[str, bool] = {}
-
-    def accepts(directory: str) -> bool:
-        if directory not in declares:
-            declares[directory] = _declares_test(root / directory / "package.json")
-        return declares[directory]
-
-    return {
-        path: owning_package(path, manifests, "package.json", accepts)
-        for path in {_file(test) for test in tests if _is_js(test)}
-    }
-
-
-def plan_packages(tests: Iterable[str], packages: JsPackages | None) -> dict[str, str | None]:
-    """The part of *packages* a plan's *tests* use, stored on the plan so a
-    later read (batches, a served plan) needs no checkout. Empty without a map."""
-    if packages is None:
-        return {}
-    return {path: packages.get(path) for path in {_file(test) for test in tests if _is_js(test)}}
 
 
 def _relative(path: str, owner: str) -> str:
@@ -129,20 +95,15 @@ class _Checkout:
             for directory, names in self.manifests.items()
             if "pom.xml" in names
         ]
-        projects = load_maven_reactor(self.root, poms).projects
-        if not any(project.manifest == "pom.xml" for project in projects):
-            return frozenset()
-        return frozenset(
-            posixpath.dirname(project.manifest)
-            for project in _declared_reactor_projects(projects, ())
-        )
+        reactor = load_maven_reactor(self.root, poms).declared_manifests
+        return frozenset(posixpath.dirname(manifest) for manifest in reactor)
 
     @cached_property
     def gradle_projects(self) -> dict[str, str]:
         """Each project directory the root settings file includes, to its project path."""
         for name in ("settings.gradle.kts", "settings.gradle"):
             if self.has("", name):
-                modules, overrides = _parse_settings(self.root / name)
+                modules, overrides = parse_settings(self.root / name)
                 projects: dict[str, str] = {}
                 for module in modules:
                     directory = overrides.get(module) or module.replace(":", "/")
@@ -151,11 +112,48 @@ class _Checkout:
         return {}
 
 
+def _declares_test(manifest: Path) -> bool:
+    try:
+        scripts = json.loads(manifest.read_text(encoding="utf-8")).get("scripts")
+    except (OSError, ValueError, AttributeError):
+        return False
+    script = scripts.get("test") if isinstance(scripts, dict) else None
+    # npm init's placeholder exits 1 without running anything.
+    return isinstance(script, str) and bool(script) and "no test specified" not in script
+
+
+def js_test_packages(
+    root: Path, manifests: Mapping[str, frozenset[str]], tests: Iterable[str]
+) -> dict[str, str | None]:
+    """The package that runs each JS/TS test in *tests*: the nearest package
+    root (*manifests*, from :func:`scan_package_manifests`) whose package.json
+    declares a test script. Blocking file reads: an async caller uses a thread.
+    """
+    repo = _Checkout(root, manifests)
+
+    def accepts(directory: str) -> bool:
+        return repo.memo(_declares_test, root / directory / "package.json")
+
+    return {
+        path: repo.owner(path, "package.json", accepts)
+        for path in {_file(test) for test in tests if _is_js(test)}
+    }
+
+
+def plan_packages(tests: Iterable[str], packages: JsPackages | None) -> dict[str, str | None]:
+    """The part of *packages* a plan's *tests* use, stored on the plan so a
+    later read (batches, a served plan) needs no checkout. Empty without a map."""
+    if packages is None:
+        return {}
+    return {path: packages.get(path) for path in {_file(test) for test in tests if _is_js(test)}}
+
+
 Run = tuple[str, str | None]
 
 
-def _go_run(repo: _Checkout, path: str) -> Run | None:
+def _go_run(repo: _Checkout, test: str) -> Run | None:
     """``go test`` on the test's package directory, inside the module owning it."""
+    path = _file(test)
     module = repo.owner(path, "go.mod")
     if module is None:
         return None
@@ -164,21 +162,19 @@ def _go_run(repo: _Checkout, path: str) -> Run | None:
     return run, _arg(f"./{package}" if package else ".")
 
 
-def _rust_test_target(data: Mapping[str, Any], rel: str) -> str | None:
-    """The integration-test target whose root is *rel*, by the crate's *data*."""
+def _declared_target(data: Mapping[str, Any], rel: str) -> str | None:
+    """The ``[[test]]`` target of the crate's manifest *data* whose root is *rel*."""
     declared = data.get("test")
     for target in declared if isinstance(declared, list) else ():
         name = target.get("name") if isinstance(target, dict) else None
-        path = isinstance(name, str) and (target.get("path") or f"tests/{name}.rs")
-        if isinstance(path, str) and posixpath.normpath(path) == rel:
+        if not isinstance(name, str):
+            continue
+        if posixpath.normpath(target.get("path") or f"tests/{name}.rs") == rel:
             return name
-    package = data.get("package")
-    if isinstance(package, dict) and package.get("autotests") is False:
-        return None
-    return _discovered_test_target(rel)
+    return None
 
 
-def _discovered_test_target(rel: str) -> str | None:
+def _discovered_target(rel: str) -> str | None:
     """The target Cargo makes of ``tests/<name>.rs`` or ``tests/<name>/main.rs``."""
     parts = rel.split("/")
     if len(parts) == 2 and parts[0] == "tests" and parts[1].endswith(".rs"):
@@ -186,8 +182,16 @@ def _discovered_test_target(rel: str) -> str | None:
     return parts[1] if len(parts) == 3 and parts[0] == "tests" and parts[2] == "main.rs" else None
 
 
-def _rust_run(repo: _Checkout, path: str) -> Run | None:
+def _rust_test_target(data: Mapping[str, Any], rel: str) -> str | None:
+    """The integration-test target whose root is *rel* (relative to its crate)."""
+    package = data.get("package")
+    autotests = not (isinstance(package, dict) and package.get("autotests") is False)
+    return _declared_target(data, rel) or (_discovered_target(rel) if autotests else None)
+
+
+def _rust_run(repo: _Checkout, test: str) -> Run | None:
     """``cargo test`` on the crate owning the test; a virtual workspace root is no crate."""
+    path = _file(test)
 
     def name(directory: str) -> str | None:
         return repo.memo(manifest_package_name, repo.root / directory / "Cargo.toml")
@@ -195,18 +199,21 @@ def _rust_run(repo: _Checkout, path: str) -> Run | None:
     crate = repo.owner(path, "Cargo.toml", lambda directory: name(directory) is not None)
     if crate is None:
         return None
-    # ``-p`` finds only crates of the workspace at the root; any other needs its manifest.
-    run = (
-        f"cargo test -p {name(crate)}"
-        if not crate or crate in repo.cargo_members
-        else f"cargo test --manifest-path {_arg(crate + '/Cargo.toml')}"
-    )
-    data = repo.memo(_toml, repo.root / crate / "Cargo.toml")
+    data = repo.memo(read_toml, repo.root / crate / "Cargo.toml")
+    if not crate or crate in repo.cargo_members:
+        run = f"cargo test -p {name(crate)}"
+    elif "workspace" in data or "workspace" not in repo.memo(read_toml, repo.root / "Cargo.toml"):
+        # ``-p`` finds only crates of the workspace at the root; any other needs its manifest.
+        run = f"cargo test --manifest-path {_arg(crate + '/Cargo.toml')}"
+    else:
+        # Cargo refuses a crate inside a workspace that does not list it (or excludes it).
+        return None
     target = _rust_test_target(data, _relative(path, crate))
     return run, f"--test {target}" if target else None
 
 
 def _maven_run(repo: _Checkout, module: str) -> Run:
+    # Ceiling: ``./mvnw`` is the sh spelling; cmd runs ``mvnw.cmd``, like ``&&`` in _ruby_run.
     mvn = "./mvnw" if repo.has("", "mvnw") else "mvn"
     if not module:
         return f"{mvn} test", None
@@ -228,8 +235,9 @@ def _gradle_run(repo: _Checkout, module: str) -> Run | None:
 _GRADLE_SCRIPTS = ("build.gradle.kts", "build.gradle")
 
 
-def _jvm_run(repo: _Checkout, path: str) -> Run | None:
+def _jvm_run(repo: _Checkout, test: str) -> Run | None:
     """Maven or Gradle on the deepest module owning the test."""
+    path = _file(test)
     maven = repo.owner(path, "pom.xml")
     gradle = max(
         (owner for name in _GRADLE_SCRIPTS if (owner := repo.owner(path, name)) is not None),
@@ -243,6 +251,7 @@ def _jvm_run(repo: _Checkout, path: str) -> Run | None:
 
 
 _RAKE_TEST = re.compile(r"""TestTask|\btask\s*\(?\s*:?['"]?test\b""")
+_RSPEC = re.compile(r"""\brspec\b""")
 
 
 def _declares_rake_test(rakefile: Path) -> bool:
@@ -252,15 +261,30 @@ def _declares_rake_test(rakefile: Path) -> bool:
         return False
 
 
-def _ruby_run(repo: _Checkout, path: str) -> Run | None:
-    """RSpec for a file under its Gemfile directory's ``spec/``, else the Rakefile's test task."""
+def _uses_rspec(directory: Path) -> bool:
+    """Whether the gem in *directory* runs RSpec: a ``.rspec`` file, or rspec
+    named in its Gemfile or gemspec."""
+    if (directory / ".rspec").is_file():
+        return True
+    for manifest in [directory / "Gemfile", *directory.glob("*.gemspec")]:
+        try:
+            if _RSPEC.search(manifest.read_text(encoding="utf-8", errors="ignore")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _ruby_run(repo: _Checkout, test: str) -> Run | None:
+    """RSpec for a spec file of a gem that uses RSpec, else the Rakefile's test task."""
+    path = _file(test)
     owner = repo.owner(path, "Gemfile")
     if owner is None:
         return None
     rel = _relative(path, owner)
     # Ceiling: ``&&`` fails in Windows PowerShell 5.1, as quoting does in _arg.
     cd = f"cd {_arg(owner)} && " if owner else ""
-    if rel.startswith("spec/"):
+    if rel.startswith("spec/") and repo.memo(_uses_rspec, repo.root / owner):
         # A spec helper is no example file, so the whole suite runs.
         return f"{cd}bundle exec rspec", _arg(rel) if rel.endswith("_spec.rb") else None
     if repo.memo(_declares_rake_test, repo.root / owner / "Rakefile"):
@@ -269,7 +293,8 @@ def _ruby_run(repo: _Checkout, path: str) -> Run | None:
 
 
 #: Test-file suffixes and the function naming the run, per language whose
-#: runner works per package.
+#: runner works per package. A runner gets the whole test id, ``::`` name
+#: included, so one that can select a single test can narrow to it.
 _RUNNERS: tuple[tuple[tuple[str, ...], Callable[[_Checkout, str], Run | None]], ...] = (
     ((".go",), _go_run),
     ((".rs",), _rust_run),
@@ -287,36 +312,53 @@ def runs_for_tests(
     """
     repo = _Checkout(root, manifests)
     runs: dict[str, list[str | None]] = {}
-    for path in sorted({_file(test) for test in tests}):
-        lowered = path.lower()
+    for test in sorted(set(tests)):
+        lowered = _file(test).lower()
         runner = next((run for suffixes, run in _RUNNERS if lowered.endswith(suffixes)), None)
-        if runner is not None and (found := runner(repo, path)) is not None:
-            runs[path] = list(found)
+        if runner is not None and (found := runner(repo, test)) is not None:
+            runs[test] = list(found)
     return runs
+
+
+def _run_key(runs: TestRuns, test: str) -> str | None:
+    """The key *runs* holds for *test*: the test itself, else its file."""
+    return test if test in runs else _file(test) if _file(test) in runs else None
 
 
 def plan_runs(tests: Iterable[str], runs: TestRuns | None) -> dict[str, list[str | None]]:
     """The part of *runs* a plan's *tests* use, stored like :func:`plan_packages`."""
     if runs is None:
         return {}
-    return {path: list(runs[path]) for path in {_file(test) for test in tests} if path in runs}
+    keys = {key for test in tests if (key := _run_key(runs, test)) is not None}
+    return {key: list(runs[key]) for key in keys}
+
+
+def _merged(args: Iterable[str]) -> list[str]:
+    """*args* with every ``--flag=value`` sharing a flag merged into one
+    ``--flag "a|b"``; any other arg is kept as is."""
+    plain: set[str] = set()
+    valued: dict[str, set[str]] = {}
+    for arg in args:
+        flag, equals, value = arg.partition("=")
+        if equals and flag.startswith("-") and " " not in flag:
+            valued.setdefault(flag, set()).add(value)
+        else:
+            plain.add(arg)
+    merged = [f'{flag} "{"|".join(sorted(values))}"' for flag, values in sorted(valued.items())]
+    return sorted(plain) + merged
 
 
 def _package_commands(tests: list[str], runs: TestRuns) -> list[str]:
     """One command per run naming every target its tests need; a test that
     needs its whole package widens the run to the whole package."""
     groups: dict[str, set[str] | None] = {}
-    for path in {_file(test) for test in tests}:
-        if path not in runs:
-            continue
-        run, arg = runs[path]
+    for key in {key for test in tests if (key := _run_key(runs, test)) is not None}:
+        run, arg = runs[key]
         if arg is None:
             groups[run] = None
         elif (args := groups.setdefault(run, set())) is not None:
             args.add(arg)
-    return [
-        " ".join([run, *sorted(args or ())]) for run, args in sorted(groups.items())
-    ]
+    return [" ".join([run, *_merged(args or ())]) for run, args in sorted(groups.items())]
 
 
 def _js_commands(tests: list[str], packages: JsPackages | None) -> list[str]:
