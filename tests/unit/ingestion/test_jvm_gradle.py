@@ -69,6 +69,60 @@ class TestJvmGradleIndex:
         assert index.lookup_class("com.example.App") == [app_path]
         assert index.lookup_class("com.example.Core") == [core_path]
 
+    @pytest.mark.parametrize("relative_repo", [False, True])
+    @pytest.mark.parametrize("absolute_override", [False, True])
+    def test_project_dir_outside_repo(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        relative_repo: bool,
+        absolute_override: bool,
+    ) -> None:
+        repo = tmp_path / "project"
+        repo.mkdir()
+        external = tmp_path / "shared"
+        external.mkdir()
+        override = external.as_posix() if absolute_override else "../shared"
+        (repo / "settings.gradle.kts").write_text(
+            'include("shared", "app")\n'
+            f'project(":shared").projectDir = file("{override}")\n'
+        )
+        app_path = _make_java_class(repo, "app", "com.example", "App")
+        _make_java_class(external, "", "com.external", "Shared")
+        monkeypatch.chdir(tmp_path)
+
+        index = build_jvm_gradle_index(Path("project") if relative_repo else repo)
+
+        assert index.projects["shared"].root_dir == "../shared"
+        assert "main" in index.projects["shared"].source_sets
+        assert index.projects["app"].root_dir == "app"
+        assert index.lookup_class("com.example.App") == [app_path]
+        assert index.lookup_class("com.external.Shared") == []
+
+    @pytest.mark.parametrize("relative_repo", [False, True])
+    def test_symlinked_module_outside_repo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_repo: bool
+    ) -> None:
+        repo = tmp_path / "project"
+        repo.mkdir()
+        external = tmp_path / "shared"
+        external.mkdir()
+        _make_java_class(external, "", "com.external", "Shared")
+        try:
+            (repo / "shared").symlink_to(external, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"Directory symlinks unavailable: {exc}")
+        (repo / "settings.gradle.kts").write_text('include("shared", "app")\n')
+        app_path = _make_java_class(repo, "app", "com.example", "App")
+        monkeypatch.chdir(tmp_path)
+
+        index = build_jvm_gradle_index(Path("project") if relative_repo else repo)
+
+        assert index.projects["shared"].root_dir == "shared"
+        assert "main" in index.projects["shared"].source_sets
+        assert index.lookup_class("com.example.App") == [app_path]
+        assert index.lookup_class("com.external.Shared") == []
+
     def test_discovers_java_and_kotlin_files(self, tmp_path: Path) -> None:
         (tmp_path / "settings.gradle.kts").write_text('include("app")\n')
         (tmp_path / "build.gradle.kts").write_text("// root\n")
