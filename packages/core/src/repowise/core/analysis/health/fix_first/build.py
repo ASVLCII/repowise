@@ -430,7 +430,7 @@ class _Files:
                 summary = text.first_sentence(suggestion_for(marker))
                 return FixStep(1, summary, path, line, False)
             return None
-        tail = (function or "").rsplit(".", 1)[-1]
+        tail = _tail(function) or ""
         best = self.extraction(finding)
         if best is not None:
             start, end = _span(best)
@@ -456,7 +456,7 @@ class _Files:
         finding's function, which :meth:`first_step` lifts first."""
         if field(finding, "biomarker_type") not in SIZE_MARKERS:
             return None
-        tail = (field(finding, "function_name") or "").rsplit(".", 1)[-1]
+        tail = _tail(field(finding, "function_name")) or ""
         plans = self.extractions.get((field(finding, "file_path"), tail)) or ()
         return max(plans, key=_extraction_worth, default=None)
 
@@ -671,15 +671,19 @@ def _above_bar(details: Mapping[str, Any]) -> LowPriority | None:
     return "above_bar_after" if details.get("leaves_above_bar") else None
 
 
-def _above_bar_note(step: str, plan: Any) -> str:
-    """A finding's borrowed *step*, saying so when the plan, applied as
-    written, leaves the function above the break-up bar (its rank facts'
-    ``leaves_above_bar``, in the plan's own words)."""
+def _above_bar_reason(plan: Any) -> str | None:
+    """Why the plan, applied as written, leaves a function above the break-up
+    bar: its rank facts' ``leaves_above_bar``, in the plan's own words."""
     rank = json_field(plan, "rank", None) or json_field(plan, "rank_json", {})
     reason = rank.get("leaves_above_bar") if isinstance(rank, dict) else None
-    if not (isinstance(reason, str) and reason):
-        return step
-    return f"{step.removesuffix('.')}. This plan alone {reason}."
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _above_bar_note(step: str, plan: Any) -> str:
+    """A finding's borrowed *step*, saying so when the plan leaves the
+    function above the break-up bar (:func:`_above_bar_reason`)."""
+    reason = _above_bar_reason(plan)
+    return f"{step.removesuffix('.')}. This plan alone {reason}." if reason else step
 
 
 def _evidence(plan: Any) -> dict[str, Any]:
@@ -880,11 +884,12 @@ def _extraction_worth(plan: Any) -> tuple[int, int]:
 
 
 def _extractions(plans: Iterable[Any]) -> dict[tuple[str, str], list[Any]]:
-    """Extract Method plans with a span, by (file, function name)."""
+    """Open Extract Method plans with a span, by (file, function name). A plan
+    a step names is read whatever its status, so a dismissed one is skipped."""
     out: dict[tuple[str, str], list[Any]] = defaultdict(list)
     for plan in plans:
         symbol = field(plan, "target_symbol")
-        if field(plan, "refactoring_type") != "extract_method" or not symbol:
+        if field(plan, "refactoring_type") != "extract_method" or not symbol or not _open(plan):
             continue
         start, end = _span(plan)
         if start and end:
@@ -1109,12 +1114,21 @@ def _with_more_steps(plan: _RefactorPlan, title: str) -> str:
     return title
 
 
-def _break_up_title(sym: str, shape: dict[str, int], span: str, name: str) -> str:
+def _break_up_title(
+    sym: str, shape: Mapping[str, int], span: str, name: str, suffix: str = ""
+) -> str:
     # The helper's signature is in the step; the title keeps its name, or
-    # drops it when the problem and the span fill the line.
+    # drops it when the problem, the span and the suffix fill the line.
     title = f"Start breaking up {sym} ({text.size_brief(shape)}): first lift lines {span}"
     into = f" into {name}" if name else ""
-    return title + into if len(title + into) <= text.TITLE_MAX else title
+    if not suffix:
+        return title + into if len(title + into) <= text.TITLE_MAX else title
+    # A caveat outranks the span and the size, which the step and why name anyway.
+    head = f"Start breaking up {sym}"
+    for candidate in (title + into, title, f"{head} ({text.size_brief(shape)})", head):
+        if len(candidate + suffix) <= text.TITLE_MAX:
+            return candidate + suffix
+    return head + suffix
 
 
 def _refactor_facts(plan: _RefactorPlan) -> tuple[FixFact, ...]:
@@ -1442,7 +1456,8 @@ def _finding_unit(lead: Any, files: _Files, first: FixStep, validate: Validate |
     public_id = field(lead, "public_id")
     rank = _finding_rank(lead, files)
     led = files.extraction(lead)
-    if led is not None and not _lowers_worst(led, rank.shape, function):
+    after = _plan_after(led, rank.shape, function) if led is not None else None
+    if after is None or not _lowers_worst(after, rank.shape):
         led = None
 
     def fields() -> dict[str, Any]:
@@ -1489,7 +1504,11 @@ def _finding_unit(lead: Any, files: _Files, first: FixStep, validate: Validate |
 
 
 def _finding_title(
-    marker: str, function: str | None, where: str, shape: dict[str, int], led: Any = None
+    marker: str,
+    function: str | None,
+    where: str,
+    shape: Mapping[str, int],
+    led: Any = None,
 ) -> str:
     """A function past the break-up bar reads "Break up", or, when a stored
     plan leads it, the title that plan's own item would have."""
@@ -1500,31 +1519,39 @@ def _finding_title(
     return text.FINDING_TITLE.get(marker, "Address the finding in {where}").format(where=where)
 
 
-def _lowers_worst(plan: Any, shape: Mapping[str, int], function: str | None) -> bool:
-    """Whether an Extract Method plan, applied as written, leaves a largest
-    function (``worth.worst_after``) smaller than the one it lifts from."""
-    after = worst_after(_evidence(plan), _plan_body(plan), _tail(function) or "", shape)
-    if after is None:
-        return False
+def _plan_after(plan: Any, shape: Mapping[str, int], function: str | None) -> dict[str, Any] | None:
+    """The largest function an Extract Method plan leaves (``worth.worst_after``)."""
+    return worst_after(_evidence(plan), _plan_body(plan), _tail(function) or "", shape)
+
+
+def _lowers_worst(after: Mapping[str, Any], shape: Mapping[str, int]) -> bool:
+    """Whether the largest function a plan leaves is smaller than the one it
+    lifts from."""
     if shape.get("ccn"):
         return after["ccn"] < shape["ccn"]
     return after["nloc"] < measured_nloc(shape)
 
 
-def _led_title(where: str, shape: dict[str, int], plan: Any) -> str:
+#: A led title's caveat when the plan, applied as written, still leaves a
+#: function at the break-up bar, as its step says (:func:`_above_bar_reason`).
+_MORE_STAGES = " (more stages needed)"
+
+
+def _led_title(where: str, shape: Mapping[str, int], plan: Any) -> str:
     body = _plan_body(plan)
+    suffix = _MORE_STAGES if _above_bar_reason(plan) else ""
     stages = _stage_count(body)
     if stages:
-        return _staged_title(where, stages)
+        return _staged_title(where, stages) + suffix
     start, end = _span(plan)
-    return _break_up_title(where, shape, f"{start}-{end}", body.get("suggested_name") or "")
+    name = body.get("suggested_name") or ""
+    return _break_up_title(where, shape, f"{start}-{end}", name, suffix)
 
 
 def _finding_plan_fields(led: Any, path: str, finding_id: str | None) -> dict[str, Any]:
     """What a finding item says about its plan: none, or the stored Extract
     Method plan its first step lifts (``led``), which the next call opens."""
     findings = (finding_id,) if finding_id else ()
-    plan_id = field(led, "public_id") if led is not None else None
     if led is None:
         return {
             "effort": FixEffortEstimate("M", "not sized; no stored plan covers this finding"),
@@ -1534,20 +1561,24 @@ def _finding_plan_fields(led: Any, path: str, finding_id: str | None) -> dict[st
             "source": FixSource(None, (), findings),
             "next_call": _file_findings_call(path),
         }
-    return {
-        "effort": FixEffortEstimate("M", "not sized; the stored plan covers the first step only"),
-        "confidence": FixConfidence(
-            "medium", "Measured from the code; the first step is a stored plan."
-        ),
-        "source": FixSource(None, (plan_id,) if plan_id else (), findings),
-        "next_call": ActionCommand.call(
+    plan_id = field(led, "public_id")
+    next_call = _file_findings_call(path)
+    if plan_id:
+        next_call = ActionCommand.call(
             "The stored plan for the first step: its span, helper and checks",
             "get_health",
             {"plan_id": plan_id},
             cli=f"repowise health --plan {plan_id}",
         )
-        if plan_id
-        else _file_findings_call(path),
+    return {
+        # The plan sizes and checks its first lift only, so the item's own
+        # effort and confidence stay the finding's.
+        "effort": FixEffortEstimate("M", "not sized for the whole fix"),
+        "confidence": FixConfidence(
+            "medium", "Measured from the code; no plan checks the whole fix."
+        ),
+        "source": FixSource(None, (plan_id,) if plan_id else (), findings),
+        "next_call": next_call,
     }
 
 

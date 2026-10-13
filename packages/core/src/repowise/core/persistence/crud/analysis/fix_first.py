@@ -449,6 +449,7 @@ async def _plans(
                 s.refactoring_type,
                 s.file_path,
                 s.target_symbol,
+                s.status,
                 s.evidence_json,
                 s.plan_json,
                 s.rank_json,

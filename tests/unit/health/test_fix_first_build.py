@@ -564,6 +564,11 @@ def _hidden_plan(plans: list | None = None) -> tuple[list, list]:
     return plans, [small]
 
 
+def _run(plans: list, refactoring: list):
+    queue = _build(plans=plans, refactoring=refactoring, performance=[])
+    return next(i for i in queue.items if i.target.symbol == "run")
+
+
 def test_a_finding_whose_plan_is_below_the_worth_floor_leads_with_that_plan() -> None:
     plans, refactoring = _hidden_plan()
     queue = _build(plans=plans, refactoring=refactoring, performance=[])
@@ -572,38 +577,55 @@ def test_a_finding_whose_plan_is_below_the_worth_floor_leads_with_that_plan() ->
     assert run.title == (
         "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35 into sum_rows"
     )
-    assert run.action.steps[0].text == "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
+    assert run.action.steps[0].text == (
+        "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
+    )
     assert run.source.plan_ids == ("refac2_big",)
     assert run.source.finding_ids == ("finding_c1",)
-    assert (run.next_call.tool, run.next_call.arguments) == ("get_health", {"plan_id": "refac2_big"})
+    assert run.next_call.tool == "get_health"
+    assert run.next_call.arguments == {"plan_id": "refac2_big"}
     assert run.next_call.cli == "repowise health --plan refac2_big"
-    assert "no stored plan" not in run.confidence.reason + run.effort.basis
+    assert "stored plan" not in run.confidence.reason + run.effort.basis
     # Ranked as the finding was: only what it says about its plan changes.
-    plain = _build(refactoring=refactoring, performance=[])
-    before = next(i for i in plain.items if i.target.symbol == "run")
-    assert (run.id, run.rank, run.tier, run.value) == (before.id, before.rank, before.tier, before.value)
+    before = _run(PLANS, refactoring)
+    assert (run.id, run.rank, run.tier, run.value) == (
+        before.id,
+        before.rank,
+        before.tier,
+        before.value,
+    )
 
 
 def test_a_staged_plan_leading_a_finding_names_its_helpers() -> None:
-    plans, refactoring = _hidden_plan(_staged_plans())
-    run = next(
-        i
-        for i in _build(plans=plans, refactoring=refactoring, performance=[]).items
-        if i.target.symbol == "run"
-    )
+    run = _run(*_hidden_plan(_staged_plans()))
     assert run.title == "Split run into 3 helpers"
     assert run.action.steps[0].text.startswith("Stage 1 of 3: ")
+
+
+def test_a_led_title_says_when_the_plan_leaves_the_function_above_the_bar() -> None:
+    plans, refactoring = _hidden_plan(_staged_plans())
+    plans[0]["rank_json"] = (
+        '{"leaves_above_bar": "leaves run at CCN 40, still above the break-up bar; '
+        'more stages needed"}'
+    )
+    run = _run(plans, refactoring)
+    assert run.title == "Split run into 3 helpers (more stages needed)"
+    assert run.source.plan_ids == ("refac2_big",)
 
 
 def test_a_plan_that_does_not_lower_the_function_leaves_the_finding_as_it_was() -> None:
     plans, refactoring = _hidden_plan()
     # Lifting all of run's complexity into one helper moves the problem, not shrinks it.
     plans[0]["evidence"] = {"slice_nloc": 45, "ccn_removed": 44}
-    run = next(
-        i
-        for i in _build(plans=plans, refactoring=refactoring, performance=[]).items
-        if i.target.symbol == "run"
-    )
+    run = _run(plans, refactoring)
     assert run.title == "Break up run (CCN 44, 50 lines)"
     assert run.source.plan_ids == ()
     assert run.next_call.arguments == {"targets": ["src/core.py"], "include": ["biomarkers"]}
+
+
+def test_a_dismissed_plan_never_gives_a_finding_its_step() -> None:
+    plans, refactoring = _hidden_plan()
+    plans[0]["status"] = "resolved"
+    run = _run(plans, refactoring)
+    assert run.title == "Break up run (CCN 44, 50 lines)"
+    assert run.source.plan_ids == () and "Extract" not in run.action.steps[0].text
