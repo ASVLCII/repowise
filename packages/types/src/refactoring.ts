@@ -2,6 +2,7 @@
 
 import type { ActionCommand } from "./actions.js";
 import type { FixExclusion } from "./fix-first.js";
+import type { GatedByLanguage } from "./health.js";
 import type { QueueCounts } from "./queue.js";
 
 export type RefactoringType =
@@ -47,6 +48,11 @@ export interface RecommendationValidation {
    *  null when none can run it). Absent when the plan was validated without
    *  a checkout or names no JS/TS test. */
   js_packages?: Record<string, string | null>;
+  /** How each shown Go, Rust, JVM or Ruby test runs: the command that runs its
+   *  package from the repository root and the argument narrowing it to the
+   *  file's target (null runs the whole package). Absent when the plan was
+   *  validated without a checkout or names no such test. */
+  test_runs?: Record<string, [string, string | null]>;
 }
 
 /** How a step's tests were found: coverage runs its lines, the graph reaches
@@ -327,6 +333,8 @@ export interface RefactoringSummary {
 export interface RefactoringTargets {
   summary: RefactoringSummary;
   plans: RefactoringPlan[];
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
 }
 
 export interface GeneratedSpan {
@@ -594,8 +602,11 @@ export interface RefactoringRollupAvailable {
   by_confidence: Record<string, number>;
   by_status: Record<string, number>;
   addresses_primary_problem: { yes: number; no: number; unknown: number };
-  /** The same lead the directive reads; null when nothing is open. */
+  /** The same lead the directive reads; null when nothing is open, or when
+   *  it is on a gated language. */
   lead: RefactoringDirectiveLead | null;
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
   refactoring_model_version: number;
   analyzed_commit: string | null;
   /** Present on the MCP block only. */
@@ -630,7 +641,10 @@ export type RefactoringDirective =
   | RefactoringDirectiveAvailable
   | {
       status: "clear";
-      reason: "no_open_opportunities" | "only_test_file_opportunities";
+      reason:
+        | "no_open_opportunities"
+        | "only_test_file_opportunities"
+        | "lead_in_gated_language";
       detail: string;
       opportunities_total: number;
     }
@@ -671,6 +685,8 @@ export interface RefactoringOpportunityPage {
   hidden?: RefactoringHiddenCounts;
   /** The plans' count vocabulary over the open inventory in the queried files. */
   counts?: QueueCounts;
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
 }
 
 /** ``GET /api/repos/{repo_id}/refactoring/summary``. */

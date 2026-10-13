@@ -658,6 +658,14 @@ export interface PerformanceDefaultQueue {
   excluded: Partial<Record<PerformanceQueueExclusion, number>>;
 }
 
+/**
+ * A layer held back pending verification on a language is left out on files
+ * of that language unless the caller opts in (`include_unverified`). Keyed by
+ * language tag (`java`, `csharp`, `c`, `cpp`, `kotlin`, `swift`); `reason`
+ * is the sentence to show.
+ */
+export type GatedByLanguage = Record<string, { count: number; reason: string }>;
+
 export interface PerformanceOpportunitySummary {
   /** `current` once materialized, `stale_model` after a model bump, or
    * `unavailable` when this index has not been analyzed yet. */
@@ -684,11 +692,15 @@ export interface PerformanceOpportunitySummary {
   /** Why the queue is not current, when it is not. */
   reason?: string;
   detail?: string;
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
 }
 
 export interface PerformanceOpportunityPage extends Paginated<PerformanceOpportunity> {
   summary: PerformanceOpportunitySummary;
   facets: PerformanceFacets;
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
   /** Filter values the server did not recognize, named rather than dropped. */
   ignored_arguments?: Record<string, string>;
   /** The causes' count vocabulary over the open inventory in the queried files. */
@@ -777,6 +789,8 @@ export interface HealthOverviewSummary {
   counts?: HealthCounts;
   /** Files a code-shape reading cannot answer for, having no recorded split. */
   unscored_files?: number;
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
 }
 
 export interface HealthOverviewResponse {
@@ -949,6 +963,8 @@ export interface FileBreakdownCategory {
 
 export interface HealthFileBreakdownResponse {
   file_path: string;
+  /** What a language gate held back, by language. Empty or absent when nothing was. */
+  gated?: GatedByLanguage;
   metric: HealthFileMetric | null;
   /** `null` for a file with no score (no health dialect for its language). */
   breakdown: {

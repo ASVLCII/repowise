@@ -73,6 +73,14 @@ but none reaches the changed function.
 A JavaScript or TypeScript test runs from the package whose `package.json`
 declares its `test` script (`npm --prefix ui-tui test -- src/a.test.ts`), and a
 test that no package can run gets no command.
+Go, Rust, Java, Kotlin and Ruby tests get a command too, for the package that owns
+them: `go test ./internal/cart`, `cargo test -p parser`, `./mvnw -pl core -am test`
+or `./gradlew :app:test`, and `bundle exec rspec` or `bundle exec rake test`. A test
+whose build file or runner the repository does not have gets no command.
+A C# test runs `dotnet test` on the test project that holds it
+(`dotnet test tests/Shop.Tests/Shop.Tests.csproj`), narrowed with `--filter` to
+the named tests, or on the repository's solution when no single test project
+does. With neither, the plan has no command.
 
 In a plan with several steps, such as a performance fix at several call sites,
 plan detail adds a `verify` to each step whose tests differ from the plan's: the
@@ -131,6 +139,11 @@ the extracted span appeared beside it (Extract Method only, so far). The other
 outcomes are `file_deleted`, `superseded` (the same plan found again under a new
 id), `target_changed` (renamed or rewritten another way) and `unknown`.
 
+Plans and opportunities on Java, C#, C and C++ files are composed and stored as
+usual but held back pending verification: the plan lists, the queue, its facets
+and the rollup's lead leave them out unless the caller passes
+`include_unverified`, and responses count them in `gated`.
+
 Break Cycle is advisory. Its plan names edges to cut, not which symbols cross
 them or how to move them, so an opportunity carries it as `evidence` rather than
 as a numbered step: it never leads, and never reaches Fix first. The plan itself
@@ -155,10 +168,10 @@ that kind passes a per-language review. When such a step follows another lead, t
 Fix first item leaves it out and says how many steps it held back; the full plan
 keeps them. Code only moves within a language family,
 so Java, Kotlin and Scala are separate. A callback is named after the call it is
-passed to. An Extract Method helper is named from a stage label, a banner comment,
-or `compute_<value>` when the span has no outside effects; otherwise it is the host
-function's name plus what the span handles, such as `render_card_directive`. A
-name already taken where the helper lands is skipped for the next candidate.
+passed to. An Extract Method helper follows the same rule: the code rarely says
+what a block is for, so the plan gives the helper a placeholder name,
+`extracted_helper`. The plan and its prompt ask you to rename it for what it
+returns or does when you apply it.
 
 An empty list means no detector found work that clears its gates. It does not mean
 the code needs no attention: check the findings in
@@ -273,8 +286,7 @@ Most plans answer a health finding, so per-path marker rules in
   declares them. In TypeScript, an optional parameter is written `T | undefined`,
   and a type an earlier guard narrows (`if (!x) return;`) is written narrowed, or
   a note asks for the narrowed type. Plan detail shows both with a copy button.
-  Where the code names no helper or type, the text reads `<name>` or `<type>` for
-  you to fill in.
+  Where the code names no type, the text reads `<type>` for you to fill in.
 - A Python, TypeScript or JavaScript function too complex for one helper can
   get a staged plan instead: several helpers the function calls in order, each
   small enough to leave the finding behind. Plan detail lists them as steps,

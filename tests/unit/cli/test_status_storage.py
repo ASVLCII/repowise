@@ -33,3 +33,51 @@ def test_health_line_for_a_repo_with_no_scored_file(monkeypatch) -> None:
     )
     line = status_cmd._query_health_line(Path("."))
     assert line is not None and "not analysed" in line and "2992" in line
+
+
+class TestStatusKeylessUpgradeNote:
+    """``repowise status`` names the keyless upgrade commands, template-only (#3105)."""
+
+    def _status_output(self, monkeypatch, tmp_path: Path, state: dict) -> str:
+        import io
+
+        from click.testing import CliRunner
+        from rich.console import Console
+
+        (tmp_path / ".repowise").mkdir()
+        buf = io.StringIO()
+        monkeypatch.setattr(
+            status_cmd, "console", Console(file=buf, width=200, force_terminal=False)
+        )
+        monkeypatch.setattr(status_cmd, "load_state", lambda _p: state)
+        monkeypatch.setattr(status_cmd, "load_config", lambda _p: {})
+        monkeypatch.setattr(status_cmd, "db_configured", lambda: False)
+        result = CliRunner().invoke(status_cmd.status_command, [str(tmp_path), "--no-workspace"])
+        assert result.exit_code == 0, result.output
+        return buf.getvalue()
+
+    def test_template_only_scope_prints_the_note(self, monkeypatch, tmp_path) -> None:
+        out = self._status_output(monkeypatch, tmp_path, {"docs_mode": "deterministic"})
+        assert "repowise generate writes the subsystem pages" in out
+        assert "--provider ollama" in out
+
+    def test_note_uses_the_scopes_own_next_command(self, monkeypatch, tmp_path) -> None:
+        state = {
+            "docs_mode": "deterministic",
+            "index_scope": {
+                "content_provenance": "template",
+                "search": {
+                    "full_text": "available",
+                    "semantic": "unavailable",
+                    "next_command": "repowise reindex",
+                },
+            },
+        }
+        out = self._status_output(monkeypatch, tmp_path, state)
+        assert "repowise reindex adds semantic search" in out
+        assert "--embedder ..." not in out
+
+    def test_model_backed_scope_does_not_print_it(self, monkeypatch, tmp_path) -> None:
+        out = self._status_output(monkeypatch, tmp_path, {"docs_mode": "llm"})
+        assert "Scope" in out
+        assert "repowise generate writes the subsystem pages" not in out

@@ -131,7 +131,7 @@ class JvmGradleIndex:
 # Settings parsing
 # ---------------------------------------------------------------------------
 
-def _parse_settings(settings_file: Path) -> tuple[list[str], dict[str, str]]:
+def parse_settings(settings_file: Path) -> tuple[list[str], dict[str, str]]:
     """Return (module_names, project_dir_overrides) from settings.gradle(.kts)."""
     if not settings_file.is_file():
         return [], {}
@@ -354,7 +354,7 @@ def build_jvm_gradle_index(
     modules: list[str] = []
     project_dir_overrides: dict[str, str] = {}
     for sp in settings_paths:
-        mods, ovr = _parse_settings(sp)
+        mods, ovr = parse_settings(sp)
         modules.extend(mods)
         project_dir_overrides.update(ovr)
 

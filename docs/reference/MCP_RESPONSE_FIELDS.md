@@ -35,6 +35,7 @@ Routine responses carry a lean envelope. `get_overview`, called once per session
 | `embedder_degraded` | When an embedder is resolved | `true` or `false` |
 | `embedder`, `embedder_warning` | Only when the embedder fell back to a mock or degraded mode, or the semantic index on disk could not be opened | Which embedder, and why |
 | `newer_release` | Once per server process | A newer repowise is published; restart the MCP server after upgrading |
+| `keyless_note` | Once per server process, on the first `get_answer` reply that degrades with `no-llm-provider` | Names what a model would add: `repowise generate` writes synthesized answers with a model (needs a key, or `--provider ollama` for a local model). Not repeated on later replies, and never sent when a provider is configured |
 | `response_budget` | When the budget cut something or could not fit the protected fields (`enforcement_error`); always on `get_overview` | `limit_chars` (the ceiling), `tier` (`default` or `expanded`), `serialized_chars` (size delivered) |
 | `omitted` | When content was cut | `refs`, `tokens`, `restore`. See [Truncation and recovery](#truncation-and-recovery) |
 | `recovery_unavailable` | When the omission store could not be written | Names the storage failure; the cut rows cannot be restored |
@@ -353,6 +354,8 @@ Items are ordered by value first, then tier. History markers (churn, ownership, 
 
 Provisional finding types appear only with `include=["unverified"]`, each marked `verification: "unverified"`. Targeted mode is never split into production and test.
 
+Health findings, refactoring plans and opportunities, and performance opportunities on Java, C#, C and C++ files are held back pending verification for those languages. They are still stored and a lookup by id still answers; `_meta.gated` counts them per layer and language, and `include=["unverified"]` shows them.
+
 ### Opt-in blocks
 
 | `include` | Adds |
@@ -399,6 +402,7 @@ The `performance_opportunities` list holds causes whose cost is measured (`cost_
 | `tiers` | Findings by tier: `high` (0.7 and up), `medium` (0.4 to 0.7), `low`. Each has path, kind, confidence, line count, cleanup impact and a stable `id` |
 | `summary` | Totals over every open finding; `filtered_findings` counts what the filters kept; `filters` echoes non-default filters; `scope` says which is which |
 | `summary.withheld_types` | Provisional finding types held back; ask with `kind=` to see them, marked unverified |
+| `summary.gated` | Findings held back pending verification on Java, C#, C, C++, Kotlin and Swift files, counted per language; `include_unverified=true` shows them |
 | `summary.call_resolution_basis` | Per language, how many call edges the index resolved and the share that are guesses: the graph the findings rest on |
 | `by_directory`, `by_owner` | Rollups with `group_by` |
 | `limit_note` | A `limit` over 25 was clamped |

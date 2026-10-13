@@ -94,7 +94,7 @@ def test_history_never_leads_and_rides_along_as_context() -> None:
 def test_text_quotes_the_stored_numbers() -> None:
     core = next(i for i in _build().items if i.kind == "refactor")
     assert core.title == (
-        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35"
     )
     # The size is a fact; the why says why it matters here.
     assert core.why == (
@@ -214,7 +214,7 @@ def test_value_leads_tier_and_a_huge_function_says_so() -> None:
     big = {**FINDINGS[1], "details": {"ccn": 120, "nloc": 900, "max_nesting": 6}}
     planned = _build(findings=[big], performance=[]).lead
     assert planned.title == (
-        "Start breaking up run (CCN 120, 900 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 120, 900 lines): first lift lines 20-35"
     )
 
 
@@ -447,7 +447,7 @@ def test_malformed_stages_never_crash_or_say_one_helper(stages, orchestrator) ->
 def test_an_unstaged_plan_reads_as_before() -> None:
     core = next(i for i in _build().items if i.kind == "refactor")
     assert core.title == (
-        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35 into sum_rows"
+        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35"
     )
     assert core.action.steps[0].text == "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
 
@@ -553,3 +553,79 @@ def test_plans_without_above_bar_facts_read_as_before() -> None:
             (i.id, i.tier, [s.text for s in i.action.steps]) for i in before.items
         ]
     assert all("This plan alone" not in s.text for i in before.items for s in i.action.steps)
+
+
+def _hidden_plan(plans: list | None = None) -> tuple[list, list]:
+    """The function's Extract Method plan is stored and open, but its
+    opportunity recovers too little health to be an item of its own."""
+    plans = copy.deepcopy(PLANS) if plans is None else plans
+    plans[0].update(file_path="src/core.py", target_symbol="src/core.py::run")
+    small = {**REFACTORING[1], "opportunity_id": "refop2_core_small", "file_path": "src/core.py"}
+    return plans, [small]
+
+
+def _run(plans: list, refactoring: list):
+    queue = _build(plans=plans, refactoring=refactoring, performance=[])
+    return next(i for i in queue.items if i.target.symbol == "run")
+
+
+def test_a_finding_whose_plan_is_below_the_worth_floor_leads_with_that_plan() -> None:
+    plans, refactoring = _hidden_plan()
+    queue = _build(plans=plans, refactoring=refactoring, performance=[])
+    run = next(i for i in queue.items if i.target.symbol == "run")
+    assert queue.totals.excluded["below_min_worth"] == 1 and run.kind == "finding"
+    assert run.title == (
+        "Start breaking up run (CCN 44, 50 lines): first lift lines 20-35"
+    )
+    assert run.action.steps[0].text == (
+        "Extract lines 20-35 of run into sum_rows(rows, limit) -> total"
+    )
+    assert run.source.plan_ids == ("refac2_big",)
+    assert run.source.finding_ids == ("finding_c1",)
+    assert run.next_call.tool == "get_health"
+    assert run.next_call.arguments == {"plan_id": "refac2_big"}
+    assert run.next_call.cli == "repowise health --plan refac2_big"
+    assert "stored plan" not in run.confidence.reason + run.effort.basis
+    # Ranked as the finding was: only what it says about its plan changes.
+    before = _run(PLANS, refactoring)
+    assert (run.id, run.rank, run.tier, run.value) == (
+        before.id,
+        before.rank,
+        before.tier,
+        before.value,
+    )
+
+
+def test_a_staged_plan_leading_a_finding_names_its_helpers() -> None:
+    run = _run(*_hidden_plan(_staged_plans()))
+    assert run.title == "Split run into 3 helpers"
+    assert run.action.steps[0].text.startswith("Stage 1 of 3: ")
+
+
+def test_a_led_title_says_when_the_plan_leaves_the_function_above_the_bar() -> None:
+    plans, refactoring = _hidden_plan(_staged_plans())
+    plans[0]["rank_json"] = (
+        '{"leaves_above_bar": "leaves run at CCN 40, still above the break-up bar; '
+        'more stages needed"}'
+    )
+    run = _run(plans, refactoring)
+    assert run.title == "Split run into 3 helpers (more stages needed)"
+    assert run.source.plan_ids == ("refac2_big",)
+
+
+def test_a_plan_that_does_not_lower_the_function_leaves_the_finding_as_it_was() -> None:
+    plans, refactoring = _hidden_plan()
+    # Lifting all of run's complexity into one helper moves the problem, not shrinks it.
+    plans[0]["evidence"] = {"slice_nloc": 45, "ccn_removed": 44}
+    run = _run(plans, refactoring)
+    assert run.title == "Break up run (CCN 44, 50 lines)"
+    assert run.source.plan_ids == ()
+    assert run.next_call.arguments == {"targets": ["src/core.py"], "include": ["biomarkers"]}
+
+
+def test_a_dismissed_plan_never_gives_a_finding_its_step() -> None:
+    plans, refactoring = _hidden_plan()
+    plans[0]["status"] = "resolved"
+    run = _run(plans, refactoring)
+    assert run.title == "Break up run (CCN 44, 50 lines)"
+    assert run.source.plan_ids == () and "Extract" not in run.action.steps[0].text
