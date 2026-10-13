@@ -47,6 +47,11 @@ export interface RecommendationValidation {
    *  null when none can run it). Absent when the plan was validated without
    *  a checkout or names no JS/TS test. */
   js_packages?: Record<string, string | null>;
+  /** How each shown Go, Rust, JVM or Ruby test runs: the command that runs its
+   *  package from the repository root and the argument narrowing it to the
+   *  file's target (null runs the whole package). Absent when the plan was
+   *  validated without a checkout or names no such test. */
+  test_runs?: Record<string, [string, string | null]>;
 }
 
 /** How a step's tests were found: coverage runs its lines, the graph reaches

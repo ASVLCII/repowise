@@ -41,7 +41,7 @@ from repowise.core.code_origin import ship_rank
 from repowise.core.test_paths import is_test_support_path, names_test_for, paired_test_names
 
 from .annotations import PlanAnnotations, partner_rows
-from .commands import JsPackages, commands_for_tests, plan_packages
+from .commands import JsPackages, TestRuns, commands_for_tests, plan_packages, plan_runs
 from .models import RefactoringSuggestion
 from .render import list_plan
 
@@ -312,6 +312,8 @@ class ValidationPlan:
     # The package each shown JS/TS test runs from (``commands.JsPackages``),
     # so a later read builds the same commands without a checkout.
     js_packages: dict[str, str | None] = field(default_factory=dict)
+    # How each shown Go, Rust, JVM or Ruby test runs (``commands.TestRuns``).
+    test_runs: dict[str, list[str | None]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -327,6 +329,7 @@ class ValidationPlan:
             "reasons": self.reasons,
             "prerequisite": self.prerequisite,
             **({"js_packages": self.js_packages} if self.js_packages else {}),
+            **({"test_runs": self.test_runs} if self.test_runs else {}),
         }
 
 
@@ -345,6 +348,7 @@ class ValidationEvidence:
     ``hubs`` are the files no reach walk passes through (:func:`hub_files`), and
     ``siblings`` each directory's files, which decide whose test a name is.
     ``js_packages`` is the package each JS/TS test runs from; absent, from the root.
+    ``test_runs`` is how each Go, Rust, JVM or Ruby test runs; absent, it gets no command.
     """
 
     symbols: Mapping[str, Sequence[SymbolSpan]] = field(default_factory=dict)
@@ -354,6 +358,7 @@ class ValidationEvidence:
     hubs: frozenset[str] = frozenset()
     siblings: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     js_packages: JsPackages | None = None
+    test_runs: TestRuns | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -913,12 +918,16 @@ def build_validation_plan(
         # Each quoted test's file, whole: shorter than naming every function,
         # and it runs at least the tests the plan quotes.
         commands = commands_for_tests(
-            sorted({test.split("::", 1)[0] for test in shown}), packages=facts.js_packages
+            sorted({test.split("::", 1)[0] for test in shown}),
+            packages=facts.js_packages,
+            runs=facts.test_runs,
         )
     else:
         shown = ordered_tests[:cap]
         reasons = {test: best[test][1] for test in shown}
-        commands = commands_for_tests(shown, total=aggregate_total, packages=facts.js_packages)
+        commands = commands_for_tests(
+            shown, total=aggregate_total, packages=facts.js_packages, runs=facts.test_runs
+        )
     files = affected_files(suggestion)
     return ValidationPlan(
         basis=aggregate_basis,
@@ -932,6 +941,7 @@ def build_validation_plan(
         targets=target_rows,
         reasons=reasons if order_tests else {},
         js_packages=plan_packages(shown, facts.js_packages),
+        test_runs=plan_runs(shown, facts.test_runs),
         # Also when tests reach the file but none reaches a function it changes.
         prerequisite=(
             _characterization_step(suggestion)

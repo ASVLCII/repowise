@@ -73,6 +73,10 @@ but none reaches the changed function.
 A JavaScript or TypeScript test runs from the package whose `package.json`
 declares its `test` script (`npm --prefix ui-tui test -- src/a.test.ts`), and a
 test that no package can run gets no command.
+Go, Rust, Java, Kotlin and Ruby tests get a command too, for the package that owns
+them: `go test ./internal/cart`, `cargo test -p parser`, `./mvnw -pl core -am test`
+or `./gradlew :app:test`, and `bundle exec rspec` or `bundle exec rake test`. A test
+whose build file or runner the repository does not have gets no command.
 
 In a plan with several steps, such as a performance fix at several call sites,
 plan detail adds a `verify` to each step whose tests differ from the plan's: the

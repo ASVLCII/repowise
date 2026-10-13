@@ -17,7 +17,12 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from repowise.core.analysis.health.refactoring.commands import JsPackages, js_test_packages
+from repowise.core.analysis.health.refactoring.commands import (
+    JsPackages,
+    TestRuns,
+    js_test_packages,
+    runs_for_tests,
+)
 from repowise.core.analysis.health.refactoring.models import RefactoringSuggestion
 from repowise.core.analysis.health.refactoring.recommendations import (
     DEFAULT_TEST_LIMIT,
@@ -208,6 +213,7 @@ async def validation_inputs(
         path: _expand_scopes(path, reached, narrowed[path]) for path, reached in inferred.items()
     }
     hub_targets = [path for path in target_files if path in hubs]
+    js_packages, runs = await _test_packages(checkout, test_files)
     evidence = await _validation_evidence(
         session,
         repository_id,
@@ -221,7 +227,8 @@ async def validation_inputs(
             siblings=_siblings(in_degree),
             symbols=await _symbol_spans(session, repository_id, target_files),
             function_tests=await tests_in_files(session, repository_id, target_files),
-            js_packages=await _js_packages(checkout, test_files),
+            js_packages=js_packages,
+            test_runs=runs,
         ),
     )
     return ValidationInputs(
@@ -267,13 +274,19 @@ async def repository_checkout(session: AsyncSession, repository_id: str) -> str 
     return await session.scalar(select(Repository.local_path).where(Repository.id == repository_id))
 
 
-async def _js_packages(checkout: str | None, test_files: set[str]) -> JsPackages | None:
+async def _test_packages(
+    checkout: str | None, test_files: set[str]
+) -> tuple[JsPackages | None, TestRuns | None]:
+    """Where each test runs, from one scan of the checkout's package roots."""
     root = Path(checkout) if checkout else None
     if root is None or not root.is_dir():
-        return None
+        return None, None
     # The health pass already scanned this commit's package roots; this reuses it.
     manifests = await asyncio.to_thread(scan_package_manifests, root)
-    return await asyncio.to_thread(js_test_packages, root, manifests, test_files)
+    return (
+        await asyncio.to_thread(js_test_packages, root, manifests, test_files),
+        await asyncio.to_thread(runs_for_tests, root, manifests, test_files),
+    )
 
 
 async def _symbol_spans(
