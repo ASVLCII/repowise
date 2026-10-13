@@ -387,7 +387,7 @@ def build_jvm_gradle_index(
         ss_map: dict[str, SourceSet] = {ss.name: ss for ss in source_sets}
         project = JvmGradleProject(
             id=module_name or "<root>",
-            root_dir=mod_dir.relative_to(resolved_repo).as_posix() if module_name else "",
+            root_dir=mod_dir.resolve().relative_to(resolved_repo).as_posix() if module_name else "",
             source_sets=ss_map,
             plugins=plugins,
         )

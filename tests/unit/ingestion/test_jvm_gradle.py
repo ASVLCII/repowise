@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import networkx as nx
+import pytest
 
 from repowise.core.ingestion.resolvers.context import ResolverContext
 from repowise.core.ingestion.resolvers.jvm_gradle import (
@@ -45,6 +46,29 @@ def _make_kotlin_class(repo: Path, module: str, package: str, class_name: str) -
 
 
 class TestJvmGradleIndex:
+    @pytest.mark.parametrize("repo_arg", ["project", "./project", "parent/../project"])
+    def test_relative_repo_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_arg: str
+    ) -> None:
+        repo = tmp_path / "project"
+        repo.mkdir()
+        (tmp_path / "parent").mkdir()
+        (repo / "settings.gradle.kts").write_text(
+            'include("app", ":libs:core")\n'
+            'project(":libs:core").projectDir = file("custom/core")\n'
+        )
+        (repo / "build.gradle.kts").write_text("// root\n")
+        app_path = _make_java_class(repo, "app", "com.example", "App")
+        core_path = _make_kotlin_class(repo, "custom/core", "com.example", "Core")
+        monkeypatch.chdir(tmp_path)
+
+        index = build_jvm_gradle_index(Path(repo_arg))
+
+        assert index.projects["app"].root_dir == "app"
+        assert index.projects["libs:core"].root_dir == "custom/core"
+        assert index.lookup_class("com.example.App") == [app_path]
+        assert index.lookup_class("com.example.Core") == [core_path]
+
     def test_discovers_java_and_kotlin_files(self, tmp_path: Path) -> None:
         (tmp_path / "settings.gradle.kts").write_text('include("app")\n')
         (tmp_path / "build.gradle.kts").write_text("// root\n")
