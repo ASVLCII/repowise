@@ -11,12 +11,15 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+from ....ingestion.external_systems.maven_model import load_maven_reactor
 from ....ingestion.package_roots import owning_package
+from ....ingestion.resolvers.jvm_gradle import _parse_settings
 from ....ingestion.workspace_members import (
     _toml,
     declared_workspace_members,
     manifest_package_name,
 )
+from ....workspace.maven_dependencies import _declared_reactor_projects
 from ...test_selection import JS_SUFFIXES, PYTHON_SUFFIXES
 
 #: Each JS/TS test file's package: the directory (``""`` is the repository
@@ -121,9 +124,6 @@ class _Checkout:
     @cached_property
     def maven_reactor(self) -> frozenset[str]:
         """Module directories the root POM reaches through ``<modules>``."""
-        from ....ingestion.external_systems.maven_model import load_maven_reactor
-        from ....workspace.maven_dependencies import _declared_reactor_projects
-
         poms = [self.root / "pom.xml"] + [
             self.root / directory / "pom.xml"
             for directory, names in self.manifests.items()
@@ -140,8 +140,6 @@ class _Checkout:
     @cached_property
     def gradle_projects(self) -> dict[str, str]:
         """Each project directory the root settings file includes, to its project path."""
-        from ....ingestion.resolvers.jvm_gradle import _parse_settings
-
         for name in ("settings.gradle.kts", "settings.gradle"):
             if self.has("", name):
                 modules, overrides = _parse_settings(self.root / name)
@@ -177,6 +175,11 @@ def _rust_test_target(data: Mapping[str, Any], rel: str) -> str | None:
     package = data.get("package")
     if isinstance(package, dict) and package.get("autotests") is False:
         return None
+    return _discovered_test_target(rel)
+
+
+def _discovered_test_target(rel: str) -> str | None:
+    """The target Cargo makes of ``tests/<name>.rs`` or ``tests/<name>/main.rs``."""
     parts = rel.split("/")
     if len(parts) == 2 and parts[0] == "tests" and parts[1].endswith(".rs"):
         return parts[1][:-3]
