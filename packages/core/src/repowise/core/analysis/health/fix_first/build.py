@@ -114,6 +114,7 @@ from repowise.core.analysis.health.worth import (
     magnitude,
     measure,
     measured_nloc,
+    worst_after,
     worth_size,
 )
 from repowise.core.analysis.next_call import ActionCommand
@@ -430,8 +431,7 @@ class _Files:
                 return FixStep(1, summary, path, line, False)
             return None
         tail = (function or "").rsplit(".", 1)[-1]
-        plans = self.extractions.get((path, tail)) or ()
-        best = max(plans, key=_extraction_worth, default=None)
+        best = self.extraction(finding)
         if best is not None:
             start, end = _span(best)
             body = _plan_body(best)
@@ -450,6 +450,15 @@ class _Files:
                 start,
             )
         return None
+
+    def extraction(self, finding: Any) -> Any | None:
+        """The best stored Extract Method plan inside a function-size
+        finding's function, which :meth:`first_step` lifts first."""
+        if field(finding, "biomarker_type") not in SIZE_MARKERS:
+            return None
+        tail = (field(finding, "function_name") or "").rsplit(".", 1)[-1]
+        plans = self.extractions.get((field(finding, "file_path"), tail)) or ()
+        return max(plans, key=_extraction_worth, default=None)
 
     def unreachable(self, path: str, symbol: str | None, line: int | None) -> bool:
         """Whether a sure dead-code finding covers ``symbol`` (at ``line``) in
@@ -1067,8 +1076,12 @@ def _refactor_title(plan: _RefactorPlan, lead_plan: Any) -> str:
     reads its title off the lead step's kind."""
     stages = _stage_count(_plan_body(lead_plan)) if plan.lead_type == "extract_method" else 0
     if stages:
-        return _with_more_steps(plan, f"Split {plan.sym} into {stages} helpers")
+        return _with_more_steps(plan, _staged_title(plan.sym, stages))
     return _span_title(plan, lead_plan)
+
+
+def _staged_title(sym: str, stages: int) -> str:
+    return f"Split {sym} into {stages} helpers"
 
 
 def _span_title(plan: _RefactorPlan, lead_plan: Any) -> str:
@@ -1078,7 +1091,7 @@ def _span_title(plan: _RefactorPlan, lead_plan: Any) -> str:
     name = _plan_body(lead_plan).get("suggested_name") or ""
     spanned = plan.lead_type == "extract_method" and bool(start and end)
     if spanned and magnitude(plan.rank.shape) >= SIZE_BREAK_UP:
-        return _break_up_title(plan, f"{start}-{end}", name)
+        return _break_up_title(plan.sym, plan.rank.shape, f"{start}-{end}", name)
     template = text.REFACTOR_TITLE.get(
         "extract_method_span" if spanned else plan.lead_type, "Refactor {file}"
     )
@@ -1096,13 +1109,10 @@ def _with_more_steps(plan: _RefactorPlan, title: str) -> str:
     return title
 
 
-def _break_up_title(plan: _RefactorPlan, span: str, name: str) -> str:
+def _break_up_title(sym: str, shape: dict[str, int], span: str, name: str) -> str:
     # The helper's signature is in the step; the title keeps its name, or
     # drops it when the problem and the span fill the line.
-    title = (
-        f"Start breaking up {plan.sym} ({text.size_brief(plan.rank.shape)}): "
-        f"first lift lines {span}"
-    )
+    title = f"Start breaking up {sym} ({text.size_brief(shape)}): first lift lines {span}"
     into = f" into {name}" if name else ""
     return title + into if len(title + into) <= text.TITLE_MAX else title
 
@@ -1431,12 +1441,15 @@ def _finding_unit(lead: Any, files: _Files, first: FixStep, validate: Validate |
     function = field(lead, "function_name")
     public_id = field(lead, "public_id")
     rank = _finding_rank(lead, files)
+    led = files.extraction(lead)
+    if led is not None and not _lowers_worst(led, rank.shape, function):
+        led = None
 
     def fields() -> dict[str, Any]:
         where = function or text.basename(path)
         line = field(lead, "line_start")
         return {
-            "title": text.clip(_finding_title(marker, function, where, rank.shape)),
+            "title": text.clip(_finding_title(marker, function, where, rank.shape, led)),
             "target": FixTarget(path, function, line, field(lead, "line_end")),
             "why": files.why(
                 path,
@@ -1455,22 +1468,12 @@ def _finding_unit(lead: Any, files: _Files, first: FixStep, validate: Validate |
             ),
             "action": _action(text.first_sentence(suggestion_for(marker)), (first,), False),
             "gain": _health_gain(rank.gain, ceiling=True),
-            "effort": FixEffortEstimate("M", "not sized; no stored plan covers this finding"),
             "risk": _risk(1, files.dependents(path)),
-            "confidence": FixConfidence(
-                "medium", "Measured from the code; no stored plan has checked a fix."
-            ),
             "verify": _verify(
                 validate(path, function, line, field(lead, "line_end")) if validate else None
             ),
             "context": files.context(path),
-            "source": FixSource(None, (), (public_id,) if public_id else ()),
-            "next_call": ActionCommand.call(
-                "Every open finding in the file, with its line and reason",
-                "get_health",
-                {"targets": [path], "include": ["biomarkers"]},
-                cli=f"repowise health --file {path}",
-            ),
+            **_finding_plan_fields(led, path, public_id),
         }
 
     return _finish_shaped(
@@ -1485,10 +1488,76 @@ def _finding_unit(lead: Any, files: _Files, first: FixStep, validate: Validate |
     )
 
 
-def _finding_title(marker: str, function: str | None, where: str, shape: Mapping[str, int]) -> str:
+def _finding_title(
+    marker: str, function: str | None, where: str, shape: dict[str, int], led: Any = None
+) -> str:
+    """A function past the break-up bar reads "Break up", or, when a stored
+    plan leads it, the title that plan's own item would have."""
     if magnitude(shape) >= SIZE_BREAK_UP and function and marker in SIZE_MARKERS:
+        if led is not None:
+            return _led_title(where, shape, led)
         return f"Break up {where} ({text.size_brief(shape)})"
     return text.FINDING_TITLE.get(marker, "Address the finding in {where}").format(where=where)
+
+
+def _lowers_worst(plan: Any, shape: Mapping[str, int], function: str | None) -> bool:
+    """Whether an Extract Method plan, applied as written, leaves a largest
+    function (``worth.worst_after``) smaller than the one it lifts from."""
+    after = worst_after(_evidence(plan), _plan_body(plan), _tail(function) or "", shape)
+    if after is None:
+        return False
+    if shape.get("ccn"):
+        return after["ccn"] < shape["ccn"]
+    return after["nloc"] < measured_nloc(shape)
+
+
+def _led_title(where: str, shape: dict[str, int], plan: Any) -> str:
+    body = _plan_body(plan)
+    stages = _stage_count(body)
+    if stages:
+        return _staged_title(where, stages)
+    start, end = _span(plan)
+    return _break_up_title(where, shape, f"{start}-{end}", body.get("suggested_name") or "")
+
+
+def _finding_plan_fields(led: Any, path: str, finding_id: str | None) -> dict[str, Any]:
+    """What a finding item says about its plan: none, or the stored Extract
+    Method plan its first step lifts (``led``), which the next call opens."""
+    findings = (finding_id,) if finding_id else ()
+    plan_id = field(led, "public_id") if led is not None else None
+    if led is None:
+        return {
+            "effort": FixEffortEstimate("M", "not sized; no stored plan covers this finding"),
+            "confidence": FixConfidence(
+                "medium", "Measured from the code; no stored plan has checked a fix."
+            ),
+            "source": FixSource(None, (), findings),
+            "next_call": _file_findings_call(path),
+        }
+    return {
+        "effort": FixEffortEstimate("M", "not sized; the stored plan covers the first step only"),
+        "confidence": FixConfidence(
+            "medium", "Measured from the code; the first step is a stored plan."
+        ),
+        "source": FixSource(None, (plan_id,) if plan_id else (), findings),
+        "next_call": ActionCommand.call(
+            "The stored plan for the first step: its span, helper and checks",
+            "get_health",
+            {"plan_id": plan_id},
+            cli=f"repowise health --plan {plan_id}",
+        )
+        if plan_id
+        else _file_findings_call(path),
+    }
+
+
+def _file_findings_call(path: str) -> ActionCommand:
+    return ActionCommand.call(
+        "Every open finding in the file, with its line and reason",
+        "get_health",
+        {"targets": [path], "include": ["biomarkers"]},
+        cli=f"repowise health --file {path}",
+    )
 
 
 def _severity(severity: str | None, low: str | None) -> str:
